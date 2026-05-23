@@ -621,12 +621,12 @@ def fusion_node(state: ScannerAgentState) -> dict:
     dep_result = extract_dependencies(str(Path(project_path)), analysis, facts, list(final_deps))
     print(f"[DEBUG] extract_dependencies 完成")
 
-    # === 修改：不再二次分流，所有包保留进入安装流程 ===
-    print(f"[DEBUG] 所有包保留进入安装流程，heavy 仅用于生成注释/json")
-    all_heavy = heavy  # fusion 阶段已经分流，直接保留
+    # heavy 包不进自动安装清单，只进 heavy.json 做提示
+    print(f"[DEBUG] heavy 包已分流，共 {len(heavy)} 个，不进入自动安装清单")
+    all_heavy = heavy
 
-    # 最终清单：所有包（含 heavy）进入 dependencies
-    final_normal = list(final_deps)
+    # 最终清单：dependencies 只含 normal 包（heavy 已剔除）
+    final_normal = normal
     # 按 bare 名去重（sam2 和 sam-2 的 bare 都是 sam2）
     seen_bare = set()
     unique_heavy = []
@@ -644,7 +644,7 @@ def fusion_node(state: ScannerAgentState) -> dict:
 
     result = {
         "scan_phase": "extracting",
-        "dependencies": list(final_deps),  # ← 所有包，不再剔除 heavy
+        "dependencies": normal,  # ← 只存 normal 包，heavy 已剔除
         "heavy_deps": all_heavy,
         "framework": dep_result["framework"],
         "python_version": dep_result["python_version"],
@@ -678,8 +678,17 @@ def write_node(state: ScannerAgentState) -> dict:
     project_path = state.get("project_path_win", "")
     deps = state.get("dependencies", [])
     heavy = state.get("heavy_deps", [])
+
+    # 双重保险：确保 requirements_agent.txt 不含 heavy 包
+    heavy_names = {h["name"] for h in heavy}
+    filtered_deps = [d for d in deps if d not in heavy_names]
+    if len(filtered_deps) < len(deps):
+        print(f"[DEBUG] write_node 过滤掉 heavy 包: {set(deps) - set(filtered_deps)}")
+    deps = filtered_deps
+    
     analysis = state.get("structure_analysis", {})
     verify = state.get("verification_result", {})
+    
     
     print(f"[DEBUG] project_path: {project_path}")
     print(f"[DEBUG] deps 数量: {len(deps)}")
@@ -712,6 +721,17 @@ def write_node(state: ScannerAgentState) -> dict:
     lines.append(f"# Framework: {analysis.get('framework', 'unknown')}")
     lines.append(f"# Python: {analysis.get('python_version', '')}")
     lines.append(f"# System deps: {', '.join(analysis.get('system_deps', []))}")
+
+     # Heavy 包提示：写入注释，用户打开文件就能看到
+    if heavy:
+        lines.append("")
+        lines.append("# --- Heavy Packages (Skipped Auto-Install) ---")
+        for h in heavy:
+            meta = h.get("meta", {})
+            lines.append(f"# {h['name']}: {meta.get('reason', '需特殊处理')}")
+            if meta.get("fix_hint"):
+                lines.append(f"#   安装示例: {meta['fix_hint']}")
+        print(f"[DEBUG] Heavy packages 注释已写入: {[h['name'] for h in heavy]}")
     
     # === 修改点 2/3：从 state 读取 risk_packages 写入注释 ===
     risk_packages = state.get("risk_packages", [])

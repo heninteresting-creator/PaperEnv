@@ -284,7 +284,7 @@ def precheck_node(state: InstallerState) -> dict:
     
     if heavy:
         print("\n" + "=" * 65)
-        print("⚠️  [Installer] 检测到以下包可能需要 CUDA/系统编译，将尝试自动安装")
+        print("⚠️  [Installer] 检测到以下包需要 CUDA/系统编译，已跳过自动安装")
         for item in heavy:
             if isinstance(item, dict):
                 name = item.get("name", "unknown")
@@ -298,7 +298,7 @@ def precheck_node(state: InstallerState) -> dict:
             print(f"      类别 : {meta.get('category', 'unknown')}")
             print(f"      原因 : {meta.get('reason', '')}")
             print(f"      提示 : {meta.get('fix_hint', '若自动安装失败，将提供手动处理方案')}")
-        print("\n   这些包已进入自动安装流程。")
+        print("\n   这些包需手动处理，安装完成后将给出提示。")
         print("=" * 65 + "\n")
 
     result = run_precheck(state)
@@ -367,6 +367,42 @@ def install_node(state: InstallerState) -> dict:
 
     print(f"\n🔧 [Installer] 开始安装 (retry={state.get('retry_count', 0)})")
     print(f"DEBUG: index_url={index_url}, req={req_path}")
+
+    # 兜底：如果 requirements_agent.txt 里混入了 heavy 包，过滤后生成临时文件
+    heavy = state.get("heavy_deps", [])
+    if heavy:
+        heavy_names = {h["name"] for h in heavy}
+        rc_req, req_content, _ = _exec_in_container(container_name, ["cat", req_path], timeout=10)
+        if rc_req == 0:
+            original_lines = req_content.split("\n")
+            filtered_lines = []
+            removed = []
+            for line in original_lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    filtered_lines.append(line)
+                    continue
+                pkg_name = _pkg_name(stripped)
+                if pkg_name in heavy_names:
+                    removed.append(pkg_name)
+                    continue
+                filtered_lines.append(line)
+            if removed:
+                temp_path = "/workspace/requirements_agent_filtered.txt"
+                # 用 python3 -c 写入容器内临时文件
+                write_cmd = (
+                    f"with open('{temp_path}', 'w') as f: "
+                    f"f.write({repr(chr(10).join(filtered_lines) + chr(10))})"
+                )
+                rc_write, _, err_write = _exec_in_container(
+                    container_name, ["python3", "-c", write_cmd], timeout=10
+                )
+                if rc_write == 0:
+                    req_path = temp_path
+                    print(f"[Installer] ⚠️  从 requirements 中过滤掉 heavy 包: {removed}")
+                    print(f"[Installer] 使用过滤后的文件: {req_path}")
+                else:
+                    print(f"[Installer] ⚠️  过滤写入失败: {err_write[:200]}，继续使用原文件")
 
     cmd = ["docker", "exec"]
     if proxy_url and not is_foreign_source:
